@@ -235,9 +235,10 @@ let lastX=0,lastY=0,touching=false,fingers=0;
 let scrollLastY=0,scrollLastX=0,scrolling=false,scrollEndTime=0,scrollLastTime=0;
 const SCROLL_GUARD_MS=300;
 const SCROLL_SPEED_THRESHOLD=1.5; /* 速度阈值，超过才加速 */
-let dragging=false,moved=false,maxFingers=0;
+let dragging=false,moved=false,maxFingers=0,totalDist=0;
+const MOVE_THRESHOLD=6; /* 累计移动超过此值才算真正移动 */
 let lastTapTime=0,waitingSecondTap=false;
-let tapTimer=null,pendingDrag=false,longPressTimer=null;
+let tapTimer=null,longPressTimer=null;
 const LONG_PRESS_MS=500;
 
 function startDrag(){
@@ -253,14 +254,16 @@ pad.addEventListener('touchstart',e=>{
   e.preventDefault();
   fingers=e.touches.length;
   if(fingers>maxFingers) maxFingers=fingers;
-  moved=false;
+  moved=false;totalDist=0;
   if(fingers===1){
     lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;
     const now=Date.now();
     if(waitingSecondTap&&(now-lastTapTime)<DOUBLE_TAP_MS){
       waitingSecondTap=false;
       if(tapTimer){clearTimeout(tapTimer);tapTimer=null;}
-      pendingDrag=true; /* 等移动才拖动，不移动就是双击 */
+      /* 双击：发送两次点击 */
+      send({t:'click'});
+      setTimeout(()=>send({t:'click'}),30);
     }
     /* 长按进入拖动 */
     longPressTimer=setTimeout(()=>{
@@ -268,7 +271,6 @@ pad.addEventListener('touchstart',e=>{
     },LONG_PRESS_MS);
   }else if(fingers===2){
     if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
-    pendingDrag=false;
     scrollLastY=(e.touches[0].clientY+e.touches[1].clientY)/2;
     scrollLastX=(e.touches[0].clientX+e.touches[1].clientX)/2;
     scrollLastTime=Date.now();
@@ -283,11 +285,14 @@ pad.addEventListener('touchmove',e=>{
     const dx=(e.touches[0].clientX-lastX)*SENSITIVITY;
     const dy=(e.touches[0].clientY-lastY)*SENSITIVITY;
     lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;
-    if(Math.abs(dx)>0.5||Math.abs(dy)>0.5){
-      moved=true;
-      if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
-      if(pendingDrag&&!dragging){pendingDrag=false;startDrag();}
-      send({t:'move',dx,dy});
+    totalDist+=Math.abs(dx)+Math.abs(dy);
+    if(totalDist>MOVE_THRESHOLD){
+      if(!moved){
+        moved=true;
+        if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+      }
+      if(dragging){send({t:'move',dx,dy});}
+      else{send({t:'move',dx,dy});}
     }
   }else if(e.touches.length===2){
     const curY=(e.touches[0].clientY+e.touches[1].clientY)/2;
@@ -310,12 +315,6 @@ pad.addEventListener('touchmove',e=>{
 pad.addEventListener('touchend',e=>{
   e.preventDefault();
   if(dragging){if(e.touches.length===0) endDrag();}
-  else if(pendingDrag&&!moved){
-    /* 双击未移动 = 双击 */
-    pendingDrag=false;
-    send({t:'click'});
-    setTimeout(()=>send({t:'click'}),30);
-  }
   else if(maxFingers===1&&fingers===1&&touching&&!moved){
     const now=Date.now();lastTapTime=now;waitingSecondTap=true;
     if(tapTimer) clearTimeout(tapTimer);
@@ -323,7 +322,7 @@ pad.addEventListener('touchend',e=>{
   }
   if(e.touches.length===0){
     if(scrolling){scrolling=false;scrollEndTime=Date.now();}
-    touching=false;fingers=0;maxFingers=0;pendingDrag=false;
+    touching=false;fingers=0;maxFingers=0;
     if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}}
 },{passive:false});
 
