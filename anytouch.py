@@ -256,27 +256,26 @@ function endDrag(){
 
 pad.addEventListener('touchstart',e=>{
   e.preventDefault();
-  fingers=e.touches.length;
+  const t=e.targetTouches;
+  fingers=t.length;
   if(fingers>maxFingers) maxFingers=fingers;
   moved=false;totalDist=0;
   if(fingers===1){
-    lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;
+    lastX=t[0].clientX;lastY=t[0].clientY;
     const now=Date.now();
     if(waitingSecondTap&&(now-lastTapTime)<DOUBLE_TAP_MS){
       waitingSecondTap=false;
       if(tapTimer){clearTimeout(tapTimer);tapTimer=null;}
-      /* 双击：发送两次点击 */
       send({t:'click'});
       setTimeout(()=>send({t:'click'}),30);
     }
-    /* 长按进入拖动 */
     longPressTimer=setTimeout(()=>{
       if(!moved&&!dragging){startDrag();}
     },LONG_PRESS_MS);
   }else if(fingers===2){
     if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
-    scrollLastY=(e.touches[0].clientY+e.touches[1].clientY)/2;
-    scrollLastX=(e.touches[0].clientX+e.touches[1].clientX)/2;
+    scrollLastY=(t[0].clientY+t[1].clientY)/2;
+    scrollLastX=(t[0].clientX+t[1].clientX)/2;
     scrollLastTime=Date.now();
   }
   touching=true;
@@ -285,28 +284,27 @@ pad.addEventListener('touchstart',e=>{
 pad.addEventListener('touchmove',e=>{
   e.preventDefault();
   if(!touching)return;
-  if(e.touches.length===1&&fingers===1){
-    const dx=(e.touches[0].clientX-lastX)*SENSITIVITY;
-    const dy=(e.touches[0].clientY-lastY)*SENSITIVITY;
-    lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;
+  const t=e.targetTouches;
+  if(t.length===1&&fingers===1){
+    const dx=(t[0].clientX-lastX)*SENSITIVITY;
+    const dy=(t[0].clientY-lastY)*SENSITIVITY;
+    lastX=t[0].clientX;lastY=t[0].clientY;
     totalDist+=Math.abs(dx)+Math.abs(dy);
     if(totalDist>MOVE_THRESHOLD){
       if(!moved){
         moved=true;
         if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
       }
-      if(dragging){send({t:'move',dx,dy});}
-      else{send({t:'move',dx,dy});}
+      send({t:'move',dx,dy});
     }
-  }else if(e.touches.length===2){
-    const curY=(e.touches[0].clientY+e.touches[1].clientY)/2;
-    const curX=(e.touches[0].clientX+e.touches[1].clientX)/2;
+  }else if(t.length===2){
+    const curY=(t[0].clientY+t[1].clientY)/2;
+    const curX=(t[0].clientX+t[1].clientX)/2;
     const dy=(curY-scrollLastY)*SCROLL_SENSITIVITY;
     const dx=(curX-scrollLastX)*SCROLL_SENSITIVITY;
     const now=Date.now();
     const dt=Math.max(now-scrollLastTime,1);
     scrollLastY=curY;scrollLastX=curX;scrollLastTime=now;
-    /* 速度=位移/时间，慢速匀速，快速拉动才加速 */
     const speedY=Math.abs(dy)/dt;
     const speedX=Math.abs(dx)/dt;
     const accelY=speedY>SCROLL_SPEED_THRESHOLD?1+Math.min((speedY-SCROLL_SPEED_THRESHOLD)*0.8,2):1;
@@ -318,33 +316,43 @@ pad.addEventListener('touchmove',e=>{
 
 pad.addEventListener('touchend',e=>{
   e.preventDefault();
-  if(dragging){if(e.touches.length===0) endDrag();}
+  if(dragging){if(e.targetTouches.length===0) endDrag();}
   else if(maxFingers===1&&fingers===1&&touching&&!moved){
     const now=Date.now();lastTapTime=now;waitingSecondTap=true;
     if(tapTimer) clearTimeout(tapTimer);
     tapTimer=setTimeout(()=>{waitingSecondTap=false;send({t:'click'});},DOUBLE_TAP_MS);
   }
-  if(e.touches.length===0){
+  if(e.targetTouches.length===0){
     if(scrolling){scrolling=false;scrollEndTime=Date.now();}
     touching=false;fingers=0;maxFingers=0;
     if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}}
 },{passive:false});
 
 function btnGuard(){return scrolling||Date.now()-scrollEndTime<SCROLL_GUARD_MS;}
+let btnLPressed=false,btnLLastX=0,btnLLastY=0;
 btnL.addEventListener('touchstart',e=>{
   e.preventDefault();e.stopPropagation();
   if(btnGuard())return;
+  btnLPressed=true;
+  btnLLastX=e.touches[0].clientX;btnLLastY=e.touches[0].clientY;
   btnL.classList.add('pressed');
   send({t:'mousedown'});
   if(navigator.vibrate)navigator.vibrate(30);
 });
-btnL.addEventListener('touchend',()=>{
-  btnL.classList.remove('pressed');
-  send({t:'mouseup'});
+btnL.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  if(!btnLPressed)return;
+  const dx=(e.touches[0].clientX-btnLLastX)*SENSITIVITY;
+  const dy=(e.touches[0].clientY-btnLLastY)*SENSITIVITY;
+  btnLLastX=e.touches[0].clientX;btnLLastY=e.touches[0].clientY;
+  if(Math.abs(dx)>0.5||Math.abs(dy)>0.5) send({t:'move',dx,dy});
 });
-btnL.addEventListener('touchcancel',()=>{
-  btnL.classList.remove('pressed');
-  send({t:'mouseup'});
+btnL.addEventListener('touchend',e=>{
+  e.preventDefault();
+  if(btnLPressed){btnLPressed=false;btnL.classList.remove('pressed');send({t:'mouseup'});}
+});
+btnL.addEventListener('touchcancel',e=>{
+  if(btnLPressed){btnLPressed=false;btnL.classList.remove('pressed');send({t:'mouseup'});}
 });
 btnR.addEventListener('touchend',()=>btnR.classList.remove('pressed'));
 btnR.addEventListener('touchcancel',()=>btnR.classList.remove('pressed'));
