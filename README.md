@@ -39,14 +39,22 @@
 ## 安装
 
 ```bash
-pip install websockets qrcode pywin32
+pip install -r requirements.txt
 ```
 
-## 使用
+## 运行cmd版本
 
 ```bash
 python anytouch.py
 ```
+
+## 运行GUI版本
+
+```bash
+python anytouch_gui.py
+```
+
+
 
 启动后终端会显示二维码和访问地址，手机扫码或浏览器输入地址即可使用。
 
@@ -72,7 +80,7 @@ python anytouch.py
 ```bash
 pip install pyinstaller
 
-pyinstaller --noconfirm --onefile --windowed --name AnyTouch --icon=AnyTouch.ico --add-data "AnyTouch.ico;." --hidden-import websockets --hidden-import qrcode --hidden-import PIL --hidden-import pystray --hidden-import win32clipboard gui.py
+pyinstaller --noconfirm --onefile --windowed --name AnyTouch --icon=AnyTouch.ico --add-data "AnyTouch.ico;." --hidden-import websockets --hidden-import qrcode --hidden-import PIL --hidden-import pystray --hidden-import win32clipboard anytouch_gui.py
 ```
 
 打包完成后在 `dist/AnyTouch.exe` 即可找到可执行文件。
