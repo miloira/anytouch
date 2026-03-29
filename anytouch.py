@@ -107,6 +107,10 @@ def handle_msg(data):
         mouse_down()
     elif t == "mouseup":
         mouse_up()
+    elif t == "rmousedown":
+        user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+    elif t == "rmouseup":
+        user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
     elif t == "type":
         text = data.get("text", "")
         if text:
@@ -151,8 +155,16 @@ body{background:#bdbdbd;color:#333;font-family:system-ui;display:flex;flex-direc
   display:flex;align-items:center;justify-content:center;position:relative;
   box-shadow:inset 0 2px 10px rgba(0,0,0,.1),inset 0 -1px 4px rgba(255,255,255,.3);
   min-height:0;border-bottom:2px solid #888}
-#pad::after{content:attr(data-status);color:#aaa;font-size:.7em;pointer-events:none;
-  position:absolute;top:8px;text-shadow:0 1px 0 rgba(255,255,255,.5)}
+#pad::after{content:'';display:none}
+#statusBar{position:absolute;top:6px;display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:auto}
+#statusLine{display:flex;align-items:center;gap:5px}
+#statusDot{width:7px;height:7px;border-radius:50%;background:#999;flex-shrink:0}
+#statusDot.on{background:#4caf50}
+#statusDot.off{background:#f44336}
+#statusText{color:#aaa;font-size:.65em;text-shadow:0 1px 0 rgba(255,255,255,.5)}
+#connText{color:#aaa;font-size:.6em;text-shadow:0 1px 0 rgba(255,255,255,.5)}
+#disconnBtn{background:none;border:1px solid #aaa;color:#aaa;font-size:.55em;padding:1px 8px;
+  border-radius:6px;cursor:pointer;margin-left:4px}
 #pad.dragging{background:linear-gradient(180deg,#d0d0d0 0%,#bebebe 100%);
   box-shadow:inset 0 3px 14px rgba(0,0,0,.2)}
 #btns{display:flex;height:80px}
@@ -172,6 +184,9 @@ body.dark #pad{background:linear-gradient(180deg,#2c2c2c 0%,#222 100%);
   box-shadow:inset 0 2px 10px rgba(0,0,0,.4),inset 0 -1px 4px rgba(255,255,255,.05);
   border-bottom-color:#111}
 body.dark #pad::after{color:#555;text-shadow:none}
+body.dark #statusText{color:#555;text-shadow:none}
+body.dark #connText{color:#555;text-shadow:none}
+body.dark #disconnBtn{border-color:#555;color:#555}
 body.dark #pad.dragging{background:linear-gradient(180deg,#262626 0%,#1e1e1e 100%);
   box-shadow:inset 0 3px 14px rgba(0,0,0,.5)}
 body.dark #btns button{background:linear-gradient(180deg,#2c2c2c 0%,#222 100%);color:#888;
@@ -183,7 +198,11 @@ body.dark #btns button.pressed{box-shadow:0 0 20px rgba(0,0,0,.8),inset 0 4px 12
 </head>
 <body>
 <div id="main">
-  <div id="pad" data-status="{{HOSTNAME}} - 连接中...">
+  <div id="pad" data-status="">
+    <div id="statusBar">
+      <div id="statusLine"><span id="statusDot"></span><span id="statusText">{{HOSTNAME}}</span></div>
+      <div id="statusLine2"><span id="connText">连接中...</span><button id="disconnBtn">断开</button></div>
+    </div>
     <button id="themeBtn">🌙</button>
   </div>
   <div id="btns">
@@ -197,6 +216,40 @@ const btnL=document.getElementById('btnL');
 const btnR=document.getElementById('btnR');
 const themeBtn=document.getElementById('themeBtn');
 const hostname='{{HOSTNAME}}';
+const statusDot=document.getElementById('statusDot');
+const statusText=document.getElementById('statusText');
+const connText=document.getElementById('connText');
+const disconnBtn=document.getElementById('disconnBtn');
+
+/* dotState: 'on'=设备在线, 'off'=设备离线 */
+function setStatus(device,conn,dotState){
+  statusText.textContent=hostname+' - '+device;
+  connText.textContent=conn;
+  statusDot.className=dotState;
+  if(dotState==='off'){disconnBtn.style.display='none';}
+  else{disconnBtn.style.display='inline-block';disconnBtn.textContent=(conn==='已连接')?'断开':'连接';}
+}
+
+let manualDisconn=false;
+function doDisconn(){
+  manualDisconn=true;wsReady=false;
+  if(ws)ws.close();
+  setStatus('在线','已断开','on');
+}
+function doReconn(){
+  manualDisconn=false;wsRejected=false;
+  setStatus('在线','连接中...','on');
+  connectWS();
+}
+disconnBtn.addEventListener('click',e=>{
+  e.stopPropagation();
+  if(wsReady)doDisconn();else if(!wsRejected&&!wsReady)doReconn();
+});
+disconnBtn.addEventListener('touchstart',e=>{e.stopPropagation();});
+disconnBtn.addEventListener('touchend',e=>{
+  e.stopPropagation();e.preventDefault();
+  if(wsReady)doDisconn();else if(!wsRejected&&!wsReady)doReconn();
+});
 
 if(localStorage.getItem('dark')==='1'){document.body.classList.add('dark');themeBtn.textContent='☀️';}
 themeBtn.addEventListener('click',e=>{
@@ -215,14 +268,25 @@ themeBtn.addEventListener('touchend',e=>{
 </script>
 <script>
 /* ── WebSocket 连接 ── */
-let ws=null,wsReady=false;
-function setStatus(s){pad.dataset.status=hostname+' - '+s;}
+let ws=null,wsReady=false,wsRejected=false;
 
 function connectWS(){
+  if(wsRejected)return;
   const proto=location.protocol==='https:'?'wss:':'ws:';
   ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}');
-  ws.onopen=()=>{wsReady=true;setStatus('已连接');};
-  ws.onclose=()=>{wsReady=false;setStatus('连接断开');setTimeout(connectWS,1500);};
+  ws.onopen=()=>{wsReady=true;setStatus('在线','已连接','on');};
+  ws.onmessage=e=>{
+    try{
+      const d=JSON.parse(e.data);
+      if(d.t==='rejected'){wsRejected=true;setStatus('在线','已被占用','off');
+        const mask=document.createElement('div');
+        mask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:99';
+        mask.innerHTML='<div style="background:#fff;color:#333;padding:24px 28px;border-radius:12px;text-align:center;max-width:80%;font-size:1em;line-height:1.6">'+d.msg+'</div>';
+        document.body.appendChild(mask);
+        wsReady=false;return;}
+    }catch(ex){}
+  };
+  ws.onclose=()=>{wsReady=false;if(!wsRejected&&!manualDisconn){setStatus('离线','连接断开','off');setTimeout(connectWS,1500);}};
   ws.onerror=()=>{ws.close();};
 }
 connectWS();
@@ -354,10 +418,33 @@ btnL.addEventListener('touchend',e=>{
 btnL.addEventListener('touchcancel',e=>{
   if(btnLPressed){btnLPressed=false;btnL.classList.remove('pressed');send({t:'mouseup'});}
 });
-btnR.addEventListener('touchend',()=>btnR.classList.remove('pressed'));
-btnR.addEventListener('touchcancel',()=>btnR.classList.remove('pressed'));
-btnL.addEventListener('click',()=>send({t:'click'}));
-btnR.addEventListener('click',()=>send({t:'rclick'}));
+let btnRPressed=false,btnRLastX=0,btnRLastY=0;
+btnR.addEventListener('touchstart',e=>{
+  e.preventDefault();e.stopPropagation();
+  if(btnGuard())return;
+  btnRPressed=true;
+  btnRLastX=e.touches[0].clientX;btnRLastY=e.touches[0].clientY;
+  btnR.classList.add('pressed');
+  send({t:'rmousedown'});
+  if(navigator.vibrate)navigator.vibrate(30);
+});
+btnR.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  if(!btnRPressed)return;
+  const dx=(e.touches[0].clientX-btnRLastX)*SENSITIVITY;
+  const dy=(e.touches[0].clientY-btnRLastY)*SENSITIVITY;
+  btnRLastX=e.touches[0].clientX;btnRLastY=e.touches[0].clientY;
+  if(Math.abs(dx)>0.5||Math.abs(dy)>0.5) send({t:'move',dx,dy});
+});
+btnR.addEventListener('touchend',e=>{
+  e.preventDefault();
+  if(btnRPressed){btnRPressed=false;btnR.classList.remove('pressed');send({t:'rmouseup'});}
+});
+btnR.addEventListener('touchcancel',e=>{
+  if(btnRPressed){btnRPressed=false;btnR.classList.remove('pressed');send({t:'rmouseup'});}
+});
+btnL.addEventListener('click',()=>send({t:'mousedown'}));
+btnR.addEventListener('click',()=>send({t:'rmousedown'}));
 </script>
 </body>
 </html>"""
@@ -382,13 +469,31 @@ class Handler(BaseHTTPRequestHandler):
 
 # ── WebSocket 服务 ────────────────────────────────────────────
 
+active_ws = None
+
+
 async def ws_handler(websocket):
-    async for message in websocket:
+    global active_ws
+    if active_ws is not None:
         try:
-            data = json.loads(message)
-            handle_msg(data)
+            await active_ws.ping()
         except Exception:
-            pass
+            active_ws = None
+    if active_ws is not None:
+        await websocket.send(json.dumps({"t": "rejected", "msg": "请先断开已连接设备！"}))
+        await websocket.close()
+        return
+    active_ws = websocket
+    try:
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+                handle_msg(data)
+            except Exception:
+                pass
+    finally:
+        if active_ws is websocket:
+            active_ws = None
 
 
 async def start_ws_server(port):
