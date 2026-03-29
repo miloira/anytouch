@@ -9,11 +9,8 @@ import threading
 import random
 
 import anytouch
-from anytouch import Handler, run_ws, get_local_ip
+from anytouch import Handler, run_ws, get_local_ip, get_free_port
 from http.server import HTTPServer
-
-HTTP_PORT = 8866
-WS_PORT = 8867
 
 BG = "#0a0a0a"
 BG_CARD = "#0d1a0d"
@@ -30,11 +27,20 @@ class AnyTouchGUI:
         self.root.geometry("400x425")
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
+
+        # 窗口标题栏图标
+        import sys, os
+        base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        ico_path = os.path.join(base, "AnyTouch.ico")
+        if os.path.exists(ico_path):
+            self.root.iconbitmap(ico_path)
         self.server = None
 
         self.ip = get_local_ip()
-        self.token = f"{random.randint(0, 999999):06d}"
-        self.url = f"http://{self.ip}:{HTTP_PORT}?token={self.token}"
+        self.http_port = get_free_port()
+        self.ws_port = get_free_port()
+        self.code = f"{random.randint(0, 999999):06d}"
+        self.url = f"http://{self.ip}:{self.http_port}?code={self.code}"
 
         self._build_ui()
         self._start_server()
@@ -58,7 +64,7 @@ class AnyTouchGUI:
     def _build_ui(self):
         # 标题
         self._label("AnyTouch", font=("Consolas", 18, "bold"), fg=ACCENT).pack(pady=(14, 0))
-        self._label("使用手机屏幕模拟鼠标触摸板", font=("Microsoft YaHei UI", 9), fg=FG).pack(pady=(0, 4))
+        self._label("远程触控板", font=("Microsoft YaHei UI", 9), fg=FG).pack(pady=(0, 4))
 
         # 卡片容器
         card = tk.Frame(self.root, bg=BG_CARD, highlightbackground="#0f3d0f", highlightthickness=1)
@@ -79,9 +85,9 @@ class AnyTouchGUI:
         # 方式二
         tk.Label(card, text="方式二：手机访问地址，输入验证码连接",
                  font=("Microsoft YaHei UI", 9, "bold"), fg=FG, bg=BG_CARD).pack(pady=(0, 2))
-        self._selectable(f"http://{self.ip}:{HTTP_PORT}", parent=card,
+        self._selectable(f"http://{self.ip}:{self.http_port}", parent=card,
                          font=("Consolas", 10), fg=ACCENT).pack(fill="x", padx=16, pady=(2, 0))
-        self._selectable(self.token, parent=card,
+        self._selectable(self.code, parent=card,
                          font=("Consolas", 24, "bold"), fg=ACCENT).pack(fill="x", padx=16, pady=(4, 4))
 
         # 设备状态（卡片内，验证码下方）
@@ -119,15 +125,15 @@ class AnyTouchGUI:
         anytouch.on_device_disconnect = on_disconnect
 
     def _start_server(self):
-        Handler.ws_port = WS_PORT
-        Handler.token = self.token
-        anytouch.ws_token = self.token
+        Handler.ws_port = self.ws_port
+        Handler.code = self.code
+        anytouch.ws_code = self.code
         try:
-            self.server = HTTPServer(("0.0.0.0", HTTP_PORT), Handler)
+            self.server = HTTPServer(("0.0.0.0", self.http_port), Handler)
         except OSError:
             return
 
-        threading.Thread(target=run_ws, args=(WS_PORT,), daemon=True).start()
+        threading.Thread(target=run_ws, args=(self.ws_port,), daemon=True).start()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def _show_qr(self):
@@ -146,6 +152,13 @@ class AnyTouchGUI:
 
 
 def main():
+    # 单实例检查（Windows Mutex）
+    import ctypes
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "AnyTouch_SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        ctypes.windll.user32.MessageBoxW(0, "AnyTouch 已在运行中", "AnyTouch", 0x40)
+        return
+
     root = tk.Tk()
     app = AnyTouchGUI(root)
 
@@ -154,13 +167,13 @@ def main():
     def create_tray():
         nonlocal tray_icon
         from pystray import Icon, MenuItem, Menu
-        from PIL import Image, ImageDraw
+        from PIL import Image
+        import sys, os
 
-        img = Image.new("RGB", (64, 64), "#1565C0")
-        d = ImageDraw.Draw(img)
-        d.rectangle([8, 8, 56, 56], fill="#fff")
-        d.rectangle([12, 12, 52, 52], fill="#1565C0")
-        d.text((18, 16), "AT", fill="#fff")
+        # 兼容 pyinstaller 打包后的路径
+        base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        ico_path = os.path.join(base, "AnyTouch.ico")
+        img = Image.open(ico_path)
 
         def on_show(icon, item):
             icon.stop()
@@ -170,7 +183,7 @@ def main():
             icon.stop()
             root.after(0, _real_quit)
 
-        tray_icon = Icon("AnyTouch", img, "AnyTouch 远程触摸板",
+        tray_icon = Icon("AnyTouch", img, "AnyTouch",
                          menu=Menu(MenuItem("显示窗口", on_show, default=True),
                                    MenuItem("退出", on_quit)))
         tray_icon.run()

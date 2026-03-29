@@ -1,7 +1,7 @@
 """
-远程触摸板 - 手机访问 Web 页面，远程同步操作电脑鼠标
+AnyTouch - 手机访问 Web 页面，远程同步操作电脑鼠标
 用法: python anytouch.py
-然后手机浏览器访问 http://<电脑IP>:8866
+然后手机浏览器访问 http://<电脑IP>:<端口号>
 """
 
 import json
@@ -59,36 +59,6 @@ def mouse_hscroll(delta):
     user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, int(delta), 0)
 
 
-# ── 键盘输入 (剪贴板粘贴) ─────────────────────────────────────
-
-
-def type_text(text):
-    """通过剪贴板粘贴文本到当前焦点位置"""
-    import win32clipboard
-    win32clipboard.OpenClipboard()
-    win32clipboard.EmptyClipboard()
-    win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
-    win32clipboard.CloseClipboard()
-    VK_CONTROL = 0x11
-    VK_V = 0x56
-    user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, 2, 0)
-    user32.keybd_event(VK_CONTROL, 0, 2, 0)
-
-
-# ── 消息处理 ──────────────────────────────────────────────────
-
-VK_MAP = {
-    "backspace": 0x08, "enter": 0x0D, "esc": 0x1B, "tab": 0x09,
-    "home": 0x24, "end": 0x23, "insert": 0x2D, "delete": 0x2E,
-    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-    "f1":0x70,"f2":0x71,"f3":0x72,"f4":0x73,"f5":0x74,"f6":0x75,
-    "f7":0x76,"f8":0x77,"f9":0x78,"f10":0x79,"f11":0x7A,"f12":0x7B,
-    "prtsc": 0x2C, "pause": 0x13, "scrolllock": 0x91, "numlock": 0x90,
-}
-
-
 def handle_msg(data):
     t = data.get("t")
     if t == "move":
@@ -113,30 +83,6 @@ def handle_msg(data):
         user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
     elif t == "rmouseup":
         user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
-    elif t == "type":
-        text = data.get("text", "")
-        if text:
-            mouse_click()
-            import time; time.sleep(0.05)
-            type_text(text)
-    elif t == "key":
-        key = data.get("key", "")
-        mod_ctrl = data.get("ctrl", False)
-        mod_alt = data.get("alt", False)
-        mod_shift = data.get("shift", False)
-        mod_win = data.get("win", False)
-        vk = VK_MAP.get(key)
-        if vk is not None:
-            if mod_ctrl: user32.keybd_event(0x11, 0, 0, 0)
-            if mod_alt:  user32.keybd_event(0x12, 0, 0, 0)
-            if mod_shift:user32.keybd_event(0x10, 0, 0, 0)
-            if mod_win:  user32.keybd_event(0x5B, 0, 0, 0)
-            user32.keybd_event(vk, 0, 0, 0)
-            user32.keybd_event(vk, 0, 2, 0)
-            if mod_win:  user32.keybd_event(0x5B, 0, 2, 0)
-            if mod_shift:user32.keybd_event(0x10, 0, 2, 0)
-            if mod_alt:  user32.keybd_event(0x12, 0, 2, 0)
-            if mod_ctrl: user32.keybd_event(0x11, 0, 2, 0)
 
 
 # ── HTML 页面 ─────────────────────────────────────────────────
@@ -146,7 +92,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>远程触摸板</title>
+<title>AnyTouch - 远程触控板</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
 body{background:#bdbdbd;color:#333;font-family:system-ui;display:flex;flex-direction:column;
@@ -511,7 +457,7 @@ btnR.addEventListener('click',()=>send({t:'rmousedown'}));
 
 # ── 验证码输入页面 ────────────────────────────────────────────
 
-TOKEN_PAGE = """<!DOCTYPE html>
+CODE_PAGE = """<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -556,7 +502,7 @@ inputs[0].focus();
 function getCode(){return inputs.map(i=>i.value).join('');}
 function submit(){
   const code=getCode();
-  if(code.length===6) location.href='/?token='+code;
+  if(code.length===6) location.href='/?code='+code;
 }
 function clearErr(){inputs.forEach(i=>i.classList.remove('err'));tip.textContent='';}
 
@@ -586,7 +532,7 @@ inputs.forEach((inp,idx)=>{
   });
 });
 
-if(location.search.includes('token=')){
+if(location.search.includes('code=')){
   inputs.forEach(i=>i.classList.add('err'));
   tip.textContent='验证码错误，请重新输入';
   inputs[0].focus();
@@ -615,13 +561,13 @@ if(locked>0){
 import time as _time
 
 # 按 IP 记录验证码错误次数: {ip: [fail_count, lock_until_timestamp]}
-_token_fails = {}
-_TOKEN_MAX_FAILS = 3
-_TOKEN_LOCK_SECONDS = 600  # 10 分钟
+_code_fails = {}
+_CODE_MAX_FAILS = 3
+_CODE_LOCK_SECONDS = 600  # 10 分钟
 
 class Handler(BaseHTTPRequestHandler):
     ws_port = 8867
-    token = None  # 设置后，访问页面需要 ?token=xxx
+    code = None  # 设置后，访问页面需要 ?code=xxx
 
     def log_message(self, fmt, *args):
         pass
@@ -638,16 +584,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        # token 校验
-        if self.token:
+        # 验证码校验
+        if self.code:
             from urllib.parse import urlparse, parse_qs
             client_ip = self._get_client_ip()
-            rec = _token_fails.get(client_ip, [0, 0])
+            rec = _code_fails.get(client_ip, [0, 0])
 
             # 检查是否被锁定
-            if rec[0] >= _TOKEN_MAX_FAILS and _time.time() < rec[1]:
+            if rec[0] >= _CODE_MAX_FAILS and _time.time() < rec[1]:
                 remain = int(rec[1] - _time.time())
-                page = TOKEN_PAGE.replace('{{LOCKED}}', str(remain))
+                page = CODE_PAGE.replace('{{LOCKED}}', str(remain))
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
@@ -655,34 +601,34 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             # 锁定已过期，重置
-            if rec[0] >= _TOKEN_MAX_FAILS and _time.time() >= rec[1]:
+            if rec[0] >= _CODE_MAX_FAILS and _time.time() >= rec[1]:
                 rec = [0, 0]
-                _token_fails[client_ip] = rec
+                _code_fails[client_ip] = rec
 
             qs = parse_qs(urlparse(self.path).query)
-            provided = qs.get("token", [None])[0]
+            provided = qs.get("code", [None])[0]
 
             if provided is None:
-                # 首次访问，无 token，显示输入页
-                page = TOKEN_PAGE.replace('{{LOCKED}}', '0')
+                # 首次访问，无验证码，显示输入页
+                page = CODE_PAGE.replace('{{LOCKED}}', '0')
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(page.encode())
                 return
 
-            if provided != self.token:
+            if provided != self.code:
                 # 验证码错误
                 rec[0] += 1
-                if rec[0] >= _TOKEN_MAX_FAILS:
-                    rec[1] = _time.time() + _TOKEN_LOCK_SECONDS
-                _token_fails[client_ip] = rec
+                if rec[0] >= _CODE_MAX_FAILS:
+                    rec[1] = _time.time() + _CODE_LOCK_SECONDS
+                _code_fails[client_ip] = rec
 
-                if rec[0] >= _TOKEN_MAX_FAILS:
+                if rec[0] >= _CODE_MAX_FAILS:
                     remain = int(rec[1] - _time.time())
-                    page = TOKEN_PAGE.replace('{{LOCKED}}', str(remain))
+                    page = CODE_PAGE.replace('{{LOCKED}}', str(remain))
                 else:
-                    page = TOKEN_PAGE.replace('{{LOCKED}}', '0')
+                    page = CODE_PAGE.replace('{{LOCKED}}', '0')
 
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -691,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             # 验证成功，清除错误记录
-            _token_fails.pop(client_ip, None)
+            _code_fails.pop(client_ip, None)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
@@ -703,7 +649,7 @@ class Handler(BaseHTTPRequestHandler):
 # ── WebSocket 服务 ────────────────────────────────────────────
 
 active_ws = None
-ws_token = None  # WebSocket 连接也需要校验的 token
+ws_code = None  # WebSocket 连接也需要校验的验证码
 
 # GUI 回调：连接/断开时通知界面
 on_device_connect = None    # callback(device_name)
@@ -736,12 +682,12 @@ def _parse_device(ua):
 
 async def ws_handler(websocket):
     global active_ws
-    # token 校验
-    if ws_token:
+    # 验证码校验
+    if ws_code:
         from urllib.parse import urlparse, parse_qs
         qs = parse_qs(urlparse(websocket.request.path).query)
-        if qs.get("token", [None])[0] != ws_token:
-            await websocket.close(4003, "无效的访问令牌")
+        if qs.get("code", [None])[0] != ws_code:
+            await websocket.close(4003, "无效的验证码")
             return
     if active_ws is not None:
         try:
@@ -796,6 +742,15 @@ def run_ws(port):
     asyncio.run(start_ws_server(port))
 
 
+def get_free_port():
+    """获取一个可用的随机端口"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 def get_local_ip():
     """获取局域网 IP"""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -820,7 +775,11 @@ def print_qr(url):
         print("  (安装 qrcode 可显示二维码: pip install qrcode)")
 
 
-def main(http_port=8866, ws_port=8867):
+def main(http_port=None, ws_port=None):
+    if http_port is None:
+        http_port = get_free_port()
+    if ws_port is None:
+        ws_port = get_free_port()
     ip = get_local_ip()
     Handler.ws_port = ws_port
     url = f"http://{ip}:{http_port}"
@@ -831,7 +790,7 @@ def main(http_port=8866, ws_port=8867):
 
     # 启动 HTTP 服务
     server = HTTPServer(("0.0.0.0", http_port), Handler)
-    print(f"远程触摸板已启动")
+    print(f"AnyTouch已启动")
     print(f"  本机访问: http://127.0.0.1:{http_port}")
     print(f"  手机访问: {url}")
     print(f"  WebSocket: ws://{ip}:{ws_port}")
