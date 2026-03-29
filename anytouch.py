@@ -268,26 +268,38 @@ themeBtn.addEventListener('touchend',e=>{
 </script>
 <script>
 /* ── WebSocket 连接 ── */
-let ws=null,wsReady=false,wsRejected=false;
+let ws=null,wsReady=false,wsRejected=false,deviceOnline=false;
+
+function checkOnline(cb){
+  const ctrl=new AbortController();
+  const tm=setTimeout(()=>ctrl.abort(),2000);
+  fetch('/ping',{signal:ctrl.signal})
+    .then(r=>{clearTimeout(tm);deviceOnline=true;cb(true);})
+    .catch(()=>{clearTimeout(tm);deviceOnline=false;cb(false);});
+}
 
 function connectWS(){
-  if(wsRejected)return;
-  const proto=location.protocol==='https:'?'wss:':'ws:';
-  ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}');
-  ws.onopen=()=>{wsReady=true;setStatus('在线','已连接','on');};
-  ws.onmessage=e=>{
-    try{
-      const d=JSON.parse(e.data);
-      if(d.t==='rejected'){wsRejected=true;setStatus('在线','已被占用','off');
-        const mask=document.createElement('div');
-        mask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:99';
-        mask.innerHTML='<div style="background:#fff;color:#333;padding:24px 28px;border-radius:12px;text-align:center;max-width:80%;font-size:1em;line-height:1.6">'+d.msg+'</div>';
-        document.body.appendChild(mask);
-        wsReady=false;return;}
-    }catch(ex){}
-  };
-  ws.onclose=()=>{wsReady=false;if(!wsRejected&&!manualDisconn){setStatus('离线','连接断开','off');setTimeout(connectWS,1500);}};
-  ws.onerror=()=>{ws.close();};
+  if(wsRejected||manualDisconn)return;
+  checkOnline(online=>{
+    if(!online){setStatus('离线','','off');setTimeout(connectWS,3000);return;}
+    setStatus('在线','连接中...','on');
+    const proto=location.protocol==='https:'?'wss:':'ws:';
+    ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}');
+    ws.onopen=()=>{wsReady=true;setStatus('在线','已连接','on');};
+    ws.onmessage=e=>{
+      try{
+        const d=JSON.parse(e.data);
+        if(d.t==='rejected'){wsRejected=true;setStatus('在线','已被占用','on');
+          const mask=document.createElement('div');
+          mask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:99';
+          mask.innerHTML='<div style="background:#fff;color:#333;padding:24px 28px;border-radius:12px;text-align:center;max-width:80%;font-size:1em;line-height:1.6">'+d.msg+'</div>';
+          document.body.appendChild(mask);
+          wsReady=false;return;}
+      }catch(ex){}
+    };
+    ws.onclose=()=>{wsReady=false;if(!wsRejected&&!manualDisconn){setStatus('离线','连接断开','off');setTimeout(connectWS,3000);}};
+    ws.onerror=()=>{ws.close();};
+  });
 }
 connectWS();
 
@@ -459,6 +471,14 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/ping":
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
