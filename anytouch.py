@@ -103,6 +103,10 @@ def handle_msg(data):
         mouse_down()
     elif t == "dragend":
         mouse_up()
+    elif t == "mousedown":
+        mouse_down()
+    elif t == "mouseup":
+        mouse_up()
     elif t == "type":
         text = data.get("text", "")
         if text:
@@ -327,10 +331,21 @@ pad.addEventListener('touchend',e=>{
 },{passive:false});
 
 function btnGuard(){return scrolling||Date.now()-scrollEndTime<SCROLL_GUARD_MS;}
-btnL.addEventListener('touchstart',e=>{e.preventDefault();e.stopPropagation();if(btnGuard())return;btnL.classList.add('pressed');send({t:'click'});if(navigator.vibrate)navigator.vibrate(30);});
-btnR.addEventListener('touchstart',e=>{e.preventDefault();e.stopPropagation();if(btnGuard())return;btnR.classList.add('pressed');send({t:'rclick'});if(navigator.vibrate)navigator.vibrate(30);});
-btnL.addEventListener('touchend',()=>btnL.classList.remove('pressed'));
-btnL.addEventListener('touchcancel',()=>btnL.classList.remove('pressed'));
+btnL.addEventListener('touchstart',e=>{
+  e.preventDefault();e.stopPropagation();
+  if(btnGuard())return;
+  btnL.classList.add('pressed');
+  send({t:'mousedown'});
+  if(navigator.vibrate)navigator.vibrate(30);
+});
+btnL.addEventListener('touchend',()=>{
+  btnL.classList.remove('pressed');
+  send({t:'mouseup'});
+});
+btnL.addEventListener('touchcancel',()=>{
+  btnL.classList.remove('pressed');
+  send({t:'mouseup'});
+});
 btnR.addEventListener('touchend',()=>btnR.classList.remove('pressed'));
 btnR.addEventListener('touchcancel',()=>btnR.classList.remove('pressed'));
 btnL.addEventListener('click',()=>send({t:'click'}));
