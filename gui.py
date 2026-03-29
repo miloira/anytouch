@@ -15,13 +15,21 @@ from http.server import HTTPServer
 HTTP_PORT = 8866
 WS_PORT = 8867
 
+BG = "#0a0a0a"
+BG_CARD = "#0d1a0d"
+FG = "#33ff33"
+FG_DIM = "#1a8c1a"
+ACCENT = "#00ff41"
+GREEN = "#00ff41"
+
 
 class AnyTouchGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("AnyTouch 远程触摸板")
-        self.root.geometry("380x360")
+        self.root.title("AnyTouch")
+        self.root.geometry("400x425")
         self.root.resizable(False, False)
+        self.root.configure(bg=BG)
         self.server = None
 
         self.ip = get_local_ip()
@@ -32,37 +40,80 @@ class AnyTouchGUI:
         self._start_server()
         self._register_callbacks()
 
+    def _label(self, text, **kwargs):
+        defaults = {"bg": BG, "fg": FG}
+        defaults.update(kwargs)
+        return tk.Label(self.root, text=text, **defaults)
+
+    def _selectable(self, text, parent=None, **kwargs):
+        """可选中复制的只读文本"""
+        p = parent or self.root
+        e = tk.Entry(p, readonlybackground=BG_CARD, relief="flat",
+                     borderwidth=0, highlightthickness=0, justify="center",
+                     selectbackground="#0f3d0f", selectforeground=ACCENT, **kwargs)
+        e.insert(0, text)
+        e.config(state="readonly")
+        return e
+
     def _build_ui(self):
         # 标题
-        tk.Label(self.root, text="AnyTouch", font=("Microsoft YaHei UI", 15, "bold")).pack(pady=(14, 2))
-        tk.Label(self.root, text="手机扫码，远程控制电脑鼠标", font=("Microsoft YaHei UI", 9), fg="#888").pack()
+        self._label("AnyTouch", font=("Consolas", 18, "bold"), fg=ACCENT).pack(pady=(14, 0))
+        self._label("使用手机屏幕模拟鼠标触摸板", font=("Microsoft YaHei UI", 9), fg=FG).pack(pady=(0, 4))
 
-        ttk.Separator(self.root, orient="horizontal").pack(fill="x", padx=20, pady=10)
+        # 卡片容器
+        card = tk.Frame(self.root, bg=BG_CARD, highlightbackground="#0f3d0f", highlightthickness=1)
+        card.pack(fill="x", padx=24, pady=(4, 0))
+
+        # 方式一
+        tk.Label(card, text="方式一：手机扫描二维码连接",
+                 font=("Microsoft YaHei UI", 9, "bold"), fg=FG, bg=BG_CARD).pack(pady=(10, 4))
 
         # 二维码
-        self.qr_label = tk.Label(self.root)
+        self.qr_label = tk.Label(card, bg=BG_CARD)
         self.qr_label.pack()
         self._show_qr()
 
-        # 验证码显示
-        tk.Label(self.root, text="验证码", font=("Microsoft YaHei UI", 9), fg="#888").pack(pady=(6, 0))
-        tk.Label(self.root, text=self.token, font=("Consolas", 22, "bold"), fg="#1565C0").pack()
+        # 分隔线
+        tk.Frame(card, bg="#0f3d0f", height=1).pack(fill="x", padx=16, pady=8)
 
-        # 设备状态标签（二维码下方）
-        self.device_label = tk.Label(self.root, text="", font=("Microsoft YaHei UI", 10), fg="#4CAF50")
-        self.device_label.pack(pady=(4, 0))
+        # 方式二
+        tk.Label(card, text="方式二：手机访问地址，输入验证码连接",
+                 font=("Microsoft YaHei UI", 9, "bold"), fg=FG, bg=BG_CARD).pack(pady=(0, 2))
+        self._selectable(f"http://{self.ip}:{HTTP_PORT}", parent=card,
+                         font=("Consolas", 10), fg=ACCENT).pack(fill="x", padx=16, pady=(2, 0))
+        self._selectable(self.token, parent=card,
+                         font=("Consolas", 24, "bold"), fg=ACCENT).pack(fill="x", padx=16, pady=(4, 4))
 
-        ttk.Separator(self.root, orient="horizontal").pack(fill="x", padx=20, pady=10)
+        # 设备状态（卡片内，验证码下方）
+        tk.Frame(card, bg="#0f3d0f", height=1).pack(fill="x", padx=16, pady=(4, 0))
 
-        # 连接地址
-        tk.Label(self.root, text=self.url, font=("Consolas", 11), fg="#1565C0").pack(pady=(0, 10))
+        status_row = tk.Frame(card, bg=BG_CARD)
+        status_row.pack(fill="x", padx=16, pady=(6, 8))
+
+        self.status_dot = tk.Canvas(status_row, width=10, height=10, bg=BG_CARD, highlightthickness=0)
+        self.status_dot.pack(side="left", padx=(0, 6))
+        self._draw_dot("#555")
+
+        self.device_label = tk.Label(status_row, text="暂无设备连接",
+                                     font=("Microsoft YaHei UI", 9), fg=FG_DIM, bg=BG_CARD)
+        self.device_label.pack(side="left")
+
+    def _draw_dot(self, color):
+        self.status_dot.delete("all")
+        self.status_dot.create_oval(1, 1, 9, 9, fill=color, outline=color)
 
     def _register_callbacks(self):
         def on_connect(device_name):
-            self.root.after(0, lambda: self.device_label.config(text=f"设备：{device_name} 正在控制中", fg="#4CAF50"))
+            def _update():
+                self._draw_dot(GREEN)
+                self.device_label.config(text=f"{device_name} 正在控制中", fg=GREEN)
+            self.root.after(0, _update)
 
         def on_disconnect():
-            self.root.after(0, lambda: self.device_label.config(text=""))
+            def _update():
+                self._draw_dot("#555")
+                self.device_label.config(text="暂无设备连接", fg=FG_DIM)
+            self.root.after(0, _update)
 
         anytouch.on_device_connect = on_connect
         anytouch.on_device_disconnect = on_disconnect
@@ -86,11 +137,12 @@ class AnyTouchGUI:
             qr = qrcode.QRCode(box_size=4, border=2)
             qr.add_data(self.url)
             qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white").resize((140, 140), Image.NEAREST)
+            img = qr.make_image(fill_color="#00ff41", back_color="#0d1a0d").resize((140, 140), Image.NEAREST)
             self._qr_photo = ImageTk.PhotoImage(img)
             self.qr_label.config(image=self._qr_photo)
         except ImportError:
-            self.qr_label.config(text="pip install qrcode pillow\n即可显示二维码", font=("Microsoft YaHei UI", 9), fg="#aaa")
+            self.qr_label.config(text="pip install qrcode pillow\n即可显示二维码",
+                                 font=("Microsoft YaHei UI", 9), fg=FG_DIM, bg=BG)
 
 
 def main():
@@ -104,7 +156,6 @@ def main():
         from pystray import Icon, MenuItem, Menu
         from PIL import Image, ImageDraw
 
-        # 生成一个简单的托盘图标
         img = Image.new("RGB", (64, 64), "#1565C0")
         d = ImageDraw.Draw(img)
         d.rectangle([8, 8, 56, 56], fill="#fff")
