@@ -300,7 +300,7 @@ function connectWS(){
     if(!online){setStatus('离线','','off');setTimeout(connectWS,3000);return;}
     setStatus('在线','连接中...','on');
     const proto=location.protocol==='https:'?'wss:':'ws:';
-    ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}');
+    ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}'+location.search);
     ws.onopen=()=>{
       ws.send(JSON.stringify({t:'hello',ua:navigator.userAgent}));
     };
@@ -509,13 +509,125 @@ btnR.addEventListener('click',()=>send({t:'rmousedown'}));
 </html>"""
 
 
+# ── 验证码输入页面 ────────────────────────────────────────────
+
+TOKEN_PAGE = """<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>验证码</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a1a;color:#eee;font-family:system-ui;display:flex;
+  align-items:center;justify-content:center;height:100vh;height:100dvh}
+.card{background:#2a2a2a;border-radius:16px;padding:36px 28px;text-align:center;
+  width:320px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+h2{font-size:1.2em;margin-bottom:6px}
+p{font-size:.85em;color:#888;margin-bottom:20px}
+.digits{display:flex;gap:8px;justify-content:center}
+.digits input{width:40px;height:50px;font-size:1.5em;text-align:center;
+  border:2px solid #444;border-radius:10px;background:#1a1a1a;color:#eee;
+  outline:none;transition:border-color .2s;caret-color:transparent}
+.digits input:focus{border-color:#fff}
+.digits input.err{border-color:#f44336;animation:shake .3s}
+.digits input.filled{border-color:#fff}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+.tip{font-size:.75em;color:#f44336;margin-top:10px;min-height:1.2em}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>🔒 请输入验证码</h2>
+  <p>请查看AnyTouch上显示的六位验证码</p>
+  <div class="digits" id="digits"></div>
+  <div class="tip" id="tip"></div>
+</div>
+<script>
+const box=document.getElementById('digits'),tip=document.getElementById('tip');
+const inputs=[];
+for(let i=0;i<6;i++){
+  const inp=document.createElement('input');
+  inp.type='tel';inp.maxLength=1;inp.inputMode='numeric';inp.autocomplete='off';
+  box.appendChild(inp);inputs.push(inp);
+}
+inputs[0].focus();
+
+function getCode(){return inputs.map(i=>i.value).join('');}
+function submit(){
+  const code=getCode();
+  if(code.length===6) location.href='/?token='+code;
+}
+function clearErr(){inputs.forEach(i=>i.classList.remove('err'));tip.textContent='';}
+
+inputs.forEach((inp,idx)=>{
+  inp.addEventListener('input',()=>{
+    clearErr();
+    inp.value=inp.value.replace(/\\D/g,'').slice(-1);
+    if(inp.value&&idx<5) inputs[idx+1].focus();
+    if(inp.value) inp.classList.add('filled'); else inp.classList.remove('filled');
+    submit();
+  });
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='Backspace'&&!inp.value&&idx>0){
+      inputs[idx-1].focus();inputs[idx-1].value='';
+      inputs[idx-1].classList.remove('filled');
+    }
+  });
+  inp.addEventListener('paste',e=>{
+    e.preventDefault();
+    const text=(e.clipboardData.getData('text')||'').replace(/\\D/g,'').slice(0,6);
+    for(let j=0;j<6;j++){
+      inputs[j].value=text[j]||'';
+      if(text[j]) inputs[j].classList.add('filled'); else inputs[j].classList.remove('filled');
+    }
+    if(text.length>0) inputs[Math.min(text.length,5)].focus();
+    submit();
+  });
+});
+
+if(location.search.includes('token=')){
+  inputs.forEach(i=>i.classList.add('err'));
+  tip.textContent='验证码错误，请重新输入';
+  inputs[0].focus();
+}
+const locked={{LOCKED}};
+if(locked>0){
+  inputs.forEach(i=>{i.disabled=true;i.classList.add('err');});
+  let rem=locked;
+  function tick(){
+    const m=Math.floor(rem/60),s=rem%60;
+    tip.textContent='错误次数过多，请等待 '+m+'分'+s+'秒';
+    if(rem<=0){
+      inputs.forEach(i=>{i.disabled=false;i.classList.remove('err');i.value='';});
+      tip.textContent='';inputs[0].focus();return;
+    }
+    rem--;setTimeout(tick,1000);
+  }
+  tick();
+}
+</script>
+</body>
+</html>"""
+
 # ── HTTP 服务 (仅提供页面) ────────────────────────────────────
+
+import time as _time
+
+# 按 IP 记录验证码错误次数: {ip: [fail_count, lock_until_timestamp]}
+_token_fails = {}
+_TOKEN_MAX_FAILS = 3
+_TOKEN_LOCK_SECONDS = 600  # 10 分钟
 
 class Handler(BaseHTTPRequestHandler):
     ws_port = 8867
+    token = None  # 设置后，访问页面需要 ?token=xxx
 
     def log_message(self, fmt, *args):
         pass
+
+    def _get_client_ip(self):
+        return self.client_address[0]
 
     def do_GET(self):
         if self.path == "/ping":
@@ -526,6 +638,60 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        # token 校验
+        if self.token:
+            from urllib.parse import urlparse, parse_qs
+            client_ip = self._get_client_ip()
+            rec = _token_fails.get(client_ip, [0, 0])
+
+            # 检查是否被锁定
+            if rec[0] >= _TOKEN_MAX_FAILS and _time.time() < rec[1]:
+                remain = int(rec[1] - _time.time())
+                page = TOKEN_PAGE.replace('{{LOCKED}}', str(remain))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(page.encode())
+                return
+
+            # 锁定已过期，重置
+            if rec[0] >= _TOKEN_MAX_FAILS and _time.time() >= rec[1]:
+                rec = [0, 0]
+                _token_fails[client_ip] = rec
+
+            qs = parse_qs(urlparse(self.path).query)
+            provided = qs.get("token", [None])[0]
+
+            if provided is None:
+                # 首次访问，无 token，显示输入页
+                page = TOKEN_PAGE.replace('{{LOCKED}}', '0')
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(page.encode())
+                return
+
+            if provided != self.token:
+                # 验证码错误
+                rec[0] += 1
+                if rec[0] >= _TOKEN_MAX_FAILS:
+                    rec[1] = _time.time() + _TOKEN_LOCK_SECONDS
+                _token_fails[client_ip] = rec
+
+                if rec[0] >= _TOKEN_MAX_FAILS:
+                    remain = int(rec[1] - _time.time())
+                    page = TOKEN_PAGE.replace('{{LOCKED}}', str(remain))
+                else:
+                    page = TOKEN_PAGE.replace('{{LOCKED}}', '0')
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(page.encode())
+                return
+
+            # 验证成功，清除错误记录
+            _token_fails.pop(client_ip, None)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
@@ -537,6 +703,11 @@ class Handler(BaseHTTPRequestHandler):
 # ── WebSocket 服务 ────────────────────────────────────────────
 
 active_ws = None
+ws_token = None  # WebSocket 连接也需要校验的 token
+
+# GUI 回调：连接/断开时通知界面
+on_device_connect = None    # callback(device_name)
+on_device_disconnect = None # callback()
 
 
 def _parse_device(ua):
@@ -565,6 +736,13 @@ def _parse_device(ua):
 
 async def ws_handler(websocket):
     global active_ws
+    # token 校验
+    if ws_token:
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(websocket.request.path).query)
+        if qs.get("token", [None])[0] != ws_token:
+            await websocket.close(4003, "无效的访问令牌")
+            return
     if active_ws is not None:
         try:
             pong = await active_ws.ping()
@@ -587,6 +765,8 @@ async def ws_handler(websocket):
                     ua = data.get("ua", "")
                     device_name = _parse_device(ua) or client_ip
                     print(f"[连接] {device_name} ({client_ip}) 已连接 - {connect_time.strftime('%H:%M:%S')}")
+                    if on_device_connect:
+                        on_device_connect(device_name)
                     await websocket.send(json.dumps({"t": "accepted"}))
                     continue
                 handle_msg(data)
@@ -602,6 +782,8 @@ async def ws_handler(websocket):
             hours, mins = divmod(mins, 60)
             dur_str = f"{hours}h{mins}m{secs}s" if hours else f"{mins}m{secs}s"
             print(f"[断开] {device_name} ({client_ip}) 已断开 - 连接时长 {dur_str}")
+            if on_device_disconnect:
+                on_device_disconnect()
 
 
 async def start_ws_server(port):
