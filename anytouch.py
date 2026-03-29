@@ -239,18 +239,18 @@ function doDisconn(){
   setStatus('在线','已断开','on');
 }
 function doReconn(){
-  manualDisconn=false;wsRejected=false;
+  manualDisconn=false;
   setStatus('在线','连接中...','on');
   connectWS();
 }
 disconnBtn.addEventListener('click',e=>{
   e.stopPropagation();
-  if(wsReady)doDisconn();else if(!wsRejected&&!wsReady)doReconn();
+  if(wsReady)doDisconn();else if(!wsReady)doReconn();
 });
 disconnBtn.addEventListener('touchstart',e=>{e.stopPropagation();});
 disconnBtn.addEventListener('touchend',e=>{
   e.stopPropagation();e.preventDefault();
-  if(wsReady)doDisconn();else if(!wsRejected&&!wsReady)doReconn();
+  if(wsReady)doDisconn();else if(!wsReady)doReconn();
 });
 
 if(localStorage.getItem('dark')==='1'){document.body.classList.add('dark');themeBtn.textContent='☀️';}
@@ -270,7 +270,21 @@ themeBtn.addEventListener('touchend',e=>{
 </script>
 <script>
 /* ── WebSocket 连接 ── */
-let ws=null,wsReady=false,wsRejected=false,deviceOnline=false;
+let ws=null,wsReady=false,deviceOnline=false,rejectedMask=null,dotTimer=null;
+
+function startWaitDots(){
+  if(dotTimer)return;
+  let count=0;
+  const span=rejectedMask&&rejectedMask.querySelector('.wait-dots');
+  if(!span)return;
+  dotTimer=setInterval(()=>{
+    count=(count+1)%4;
+    span.textContent='.'.repeat(count||1);
+  },500);
+}
+function stopWaitDots(){
+  if(dotTimer){clearInterval(dotTimer);dotTimer=null;}
+}
 
 function checkOnline(cb){
   const ctrl=new AbortController();
@@ -281,27 +295,39 @@ function checkOnline(cb){
 }
 
 function connectWS(){
-  if(wsRejected||manualDisconn)return;
+  if(manualDisconn)return;
   checkOnline(online=>{
     if(!online){setStatus('离线','','off');setTimeout(connectWS,3000);return;}
     setStatus('在线','连接中...','on');
     const proto=location.protocol==='https:'?'wss:':'ws:';
     ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}');
-    ws.onopen=()=>{wsReady=true;setStatus('在线','已连接','on');
+    ws.onopen=()=>{
       ws.send(JSON.stringify({t:'hello',ua:navigator.userAgent}));
     };
     ws.onmessage=e=>{
       try{
         const d=JSON.parse(e.data);
-        if(d.t==='rejected'){wsRejected=true;setStatus('在线','已被占用','on');
-          const mask=document.createElement('div');
-          mask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:99';
-          mask.innerHTML='<div style="background:#fff;color:#333;padding:24px 28px;border-radius:12px;text-align:center;max-width:80%;font-size:1em;line-height:1.6">'+d.msg+'</div>';
-          document.body.appendChild(mask);
-          wsReady=false;return;}
+        if(d.t==='accepted'){
+          wsReady=true;setStatus('在线','已连接','on');
+          if(rejectedMask){rejectedMask.remove();rejectedMask=null;stopWaitDots();}
+          return;
+        }
+        if(d.t==='rejected'){
+          wsReady=false;setStatus('在线','已被占用','on');
+          if(!rejectedMask){
+            rejectedMask=document.createElement('div');
+            rejectedMask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:99';
+            rejectedMask.innerHTML='<div style="background:#fff;color:#333;padding:24px 28px;border-radius:12px;text-align:center;max-width:80%;font-size:1em;line-height:1.6">'+d.msg+'<br><span style="font-size:.8em;color:#888;margin-top:8px;display:block">等待设备空闲后自动连接<span class="wait-dots">.</span></span></div>';
+            document.body.appendChild(rejectedMask);
+            startWaitDots();
+          }
+          return;}
       }catch(ex){}
     };
-    ws.onclose=()=>{wsReady=false;if(!wsRejected&&!manualDisconn){setStatus('离线','连接断开','off');setTimeout(connectWS,3000);}};
+    ws.onclose=()=>{wsReady=false;if(!manualDisconn){
+      if(!rejectedMask)setStatus('离线','连接断开','off');
+      setTimeout(connectWS,1000);
+    }};
     ws.onerror=()=>{ws.close();};
   });
 }
@@ -541,7 +567,8 @@ async def ws_handler(websocket):
     global active_ws
     if active_ws is not None:
         try:
-            await active_ws.ping()
+            pong = await active_ws.ping()
+            await asyncio.wait_for(pong, timeout=1)
         except Exception:
             active_ws = None
     if active_ws is not None:
@@ -560,6 +587,7 @@ async def ws_handler(websocket):
                     ua = data.get("ua", "")
                     device_name = _parse_device(ua) or client_ip
                     print(f"[连接] {device_name} ({client_ip}) 已连接 - {connect_time.strftime('%H:%M:%S')}")
+                    await websocket.send(json.dumps({"t": "accepted"}))
                     continue
                 handle_msg(data)
             except Exception:
