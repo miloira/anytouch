@@ -5,10 +5,12 @@
 """
 
 import json
+import re
 import socket
 import platform
 import asyncio
 import threading
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from ctypes import windll
 
@@ -285,7 +287,9 @@ function connectWS(){
     setStatus('在线','连接中...','on');
     const proto=location.protocol==='https:'?'wss:':'ws:';
     ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}');
-    ws.onopen=()=>{wsReady=true;setStatus('在线','已连接','on');};
+    ws.onopen=()=>{wsReady=true;setStatus('在线','已连接','on');
+      ws.send(JSON.stringify({t:'hello',ua:navigator.userAgent}));
+    };
     ws.onmessage=e=>{
       try{
         const d=JSON.parse(e.data);
@@ -318,8 +322,9 @@ const SCROLL_SPEED_THRESHOLD=1.5; /* 速度阈值，超过才加速 */
 let dragging=false,moved=false,maxFingers=0,totalDist=0;
 const MOVE_THRESHOLD=6; /* 累计移动超过此值才算真正移动 */
 let lastTapTime=0,waitingSecondTap=false;
-let tapTimer=null,longPressTimer=null;
+let tapTimer=null,longPressTimer=null,pendingDblTap=false;
 const LONG_PRESS_MS=500;
+const DBL_TAP_HOLD_MS=200; /* 双击第二下按住超过此时间进入press down */
 
 function startDrag(){
   dragging=true;pad.classList.add('dragging');
@@ -342,12 +347,16 @@ pad.addEventListener('touchstart',e=>{
     if(waitingSecondTap&&(now-lastTapTime)<DOUBLE_TAP_MS){
       waitingSecondTap=false;
       if(tapTimer){clearTimeout(tapTimer);tapTimer=null;}
-      send({t:'click'});
-      setTimeout(()=>send({t:'click'}),30);
+      /* 双击第二下按住：等一小段时间判断是双击还是press down */
+      pendingDblTap=true;
+      longPressTimer=setTimeout(()=>{
+        if(pendingDblTap&&!moved&&!dragging){pendingDblTap=false;startDrag();}
+      },DBL_TAP_HOLD_MS);
+    } else {
+      longPressTimer=setTimeout(()=>{
+        if(!moved&&!dragging){startDrag();}
+      },LONG_PRESS_MS);
     }
-    longPressTimer=setTimeout(()=>{
-      if(!moved&&!dragging){startDrag();}
-    },LONG_PRESS_MS);
   }else if(fingers===2){
     if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
     scrollLastY=(t[0].clientY+t[1].clientY)/2;
@@ -361,7 +370,7 @@ pad.addEventListener('touchmove',e=>{
   e.preventDefault();
   if(!touching)return;
   const t=e.targetTouches;
-  if(t.length===1&&fingers===1){
+  if(t.length===1&&fingers===1&&!scrolling&&maxFingers===1){
     const dx=(t[0].clientX-lastX)*SENSITIVITY;
     const dy=(t[0].clientY-lastY)*SENSITIVITY;
     lastX=t[0].clientX;lastY=t[0].clientY;
@@ -370,6 +379,7 @@ pad.addEventListener('touchmove',e=>{
       if(!moved){
         moved=true;
         if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+        if(pendingDblTap&&!dragging){pendingDblTap=false;startDrag();}
       }
       send({t:'move',dx,dy});
     }
@@ -393,6 +403,17 @@ pad.addEventListener('touchmove',e=>{
 pad.addEventListener('touchend',e=>{
   e.preventDefault();
   if(dragging){if(e.targetTouches.length===0) endDrag();}
+  else if(pendingDblTap&&!moved){
+    /* 双击第二下快速松手 = 双击 */
+    pendingDblTap=false;
+    if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+    send({t:'click'});
+    setTimeout(()=>send({t:'click'}),30);
+  }
+  else if(maxFingers===2&&!scrolling&&!moved&&touching){
+    /* 双指轻点 = 右键 */
+    send({t:'rclick'});
+  }
   else if(maxFingers===1&&fingers===1&&touching&&!moved){
     const now=Date.now();lastTapTime=now;waitingSecondTap=true;
     if(tapTimer) clearTimeout(tapTimer);
@@ -400,7 +421,7 @@ pad.addEventListener('touchend',e=>{
   }
   if(e.targetTouches.length===0){
     if(scrolling){scrolling=false;scrollEndTime=Date.now();}
-    touching=false;fingers=0;maxFingers=0;
+    touching=false;fingers=0;maxFingers=0;pendingDblTap=false;
     if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}}
 },{passive:false});
 
@@ -492,6 +513,30 @@ class Handler(BaseHTTPRequestHandler):
 active_ws = None
 
 
+def _parse_device(ua):
+    """从 User-Agent 提取设备名称"""
+    # iPhone
+    m = re.search(r'(iPhone)', ua)
+    if m:
+        return m.group(1)
+    # iPad
+    m = re.search(r'(iPad)', ua)
+    if m:
+        return m.group(1)
+    # Android 设备型号: "Build/xxx" 前面的部分
+    m = re.search(r';\s*([^;)]+?)\s*Build/', ua)
+    if m:
+        return m.group(1).strip()
+    # Android 通用
+    if 'Android' in ua:
+        return 'Android'
+    # 桌面浏览器
+    for name in ['Chrome', 'Firefox', 'Safari', 'Edge']:
+        if name in ua:
+            return f'浏览器 ({name})'
+    return None
+
+
 async def ws_handler(websocket):
     global active_ws
     if active_ws is not None:
@@ -504,16 +549,31 @@ async def ws_handler(websocket):
         await websocket.close()
         return
     active_ws = websocket
+    client_ip = websocket.remote_address[0] if websocket.remote_address else "未知"
+    device_name = client_ip
+    connect_time = datetime.now()
     try:
         async for message in websocket:
             try:
                 data = json.loads(message)
+                if data.get("t") == "hello":
+                    ua = data.get("ua", "")
+                    device_name = _parse_device(ua) or client_ip
+                    print(f"[连接] {device_name} ({client_ip}) 已连接 - {connect_time.strftime('%H:%M:%S')}")
+                    continue
                 handle_msg(data)
             except Exception:
                 pass
+    except Exception:
+        pass
     finally:
         if active_ws is websocket:
             active_ws = None
+            duration = datetime.now() - connect_time
+            mins, secs = divmod(int(duration.total_seconds()), 60)
+            hours, mins = divmod(mins, 60)
+            dur_str = f"{hours}h{mins}m{secs}s" if hours else f"{mins}m{secs}s"
+            print(f"[断开] {device_name} ({client_ip}) 已断开 - 连接时长 {dur_str}")
 
 
 async def start_ws_server(port):
