@@ -1,12 +1,14 @@
 """
 远程触摸板 - 手机访问 Web 页面，远程同步操作电脑鼠标
-用法: python remote_mouse.py
+用法: python anytouch.py
 然后手机浏览器访问 http://<电脑IP>:8866
 """
 
 import json
 import socket
 import platform
+import asyncio
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from ctypes import windll
 
@@ -18,6 +20,7 @@ MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_HWHEEL = 0x1000
 
 user32 = windll.user32
 screen_w = user32.GetSystemMetrics(0)
@@ -50,6 +53,10 @@ def mouse_scroll(delta):
     user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, int(delta), 0)
 
 
+def mouse_hscroll(delta):
+    user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, int(delta), 0)
+
+
 # ── 键盘输入 (剪贴板粘贴) ─────────────────────────────────────
 
 
@@ -60,13 +67,66 @@ def type_text(text):
     win32clipboard.EmptyClipboard()
     win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
     win32clipboard.CloseClipboard()
-    # 模拟 Ctrl+V
     VK_CONTROL = 0x11
     VK_V = 0x56
     user32.keybd_event(VK_CONTROL, 0, 0, 0)
     user32.keybd_event(VK_V, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, 2, 0)       # KEYEVENTF_KEYUP
-    user32.keybd_event(VK_CONTROL, 0, 2, 0)  # KEYEVENTF_KEYUP
+    user32.keybd_event(VK_V, 0, 2, 0)
+    user32.keybd_event(VK_CONTROL, 0, 2, 0)
+
+
+# ── 消息处理 ──────────────────────────────────────────────────
+
+VK_MAP = {
+    "backspace": 0x08, "enter": 0x0D, "esc": 0x1B, "tab": 0x09,
+    "home": 0x24, "end": 0x23, "insert": 0x2D, "delete": 0x2E,
+    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    "f1":0x70,"f2":0x71,"f3":0x72,"f4":0x73,"f5":0x74,"f6":0x75,
+    "f7":0x76,"f8":0x77,"f9":0x78,"f10":0x79,"f11":0x7A,"f12":0x7B,
+    "prtsc": 0x2C, "pause": 0x13, "scrolllock": 0x91, "numlock": 0x90,
+}
+
+
+def handle_msg(data):
+    t = data.get("t")
+    if t == "move":
+        mouse_move(data["dx"], data["dy"])
+    elif t == "click":
+        mouse_click()
+    elif t == "rclick":
+        mouse_right_click()
+    elif t == "scroll":
+        mouse_scroll(data["d"])
+    elif t == "hscroll":
+        mouse_hscroll(data["d"])
+    elif t == "dragstart":
+        mouse_down()
+    elif t == "dragend":
+        mouse_up()
+    elif t == "type":
+        text = data.get("text", "")
+        if text:
+            mouse_click()
+            import time; time.sleep(0.05)
+            type_text(text)
+    elif t == "key":
+        key = data.get("key", "")
+        mod_ctrl = data.get("ctrl", False)
+        mod_alt = data.get("alt", False)
+        mod_shift = data.get("shift", False)
+        mod_win = data.get("win", False)
+        vk = VK_MAP.get(key)
+        if vk is not None:
+            if mod_ctrl: user32.keybd_event(0x11, 0, 0, 0)
+            if mod_alt:  user32.keybd_event(0x12, 0, 0, 0)
+            if mod_shift:user32.keybd_event(0x10, 0, 0, 0)
+            if mod_win:  user32.keybd_event(0x5B, 0, 0, 0)
+            user32.keybd_event(vk, 0, 0, 0)
+            user32.keybd_event(vk, 0, 2, 0)
+            if mod_win:  user32.keybd_event(0x5B, 0, 2, 0)
+            if mod_shift:user32.keybd_event(0x10, 0, 2, 0)
+            if mod_alt:  user32.keybd_event(0x12, 0, 2, 0)
+            if mod_ctrl: user32.keybd_event(0x11, 0, 2, 0)
 
 
 # ── HTML 页面 ─────────────────────────────────────────────────
@@ -97,7 +157,8 @@ body{background:#bdbdbd;color:#333;font-family:system-ui;display:flex;flex-direc
   cursor:pointer;transition:all .12s ease;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.25),0 1px 2px rgba(0,0,0,.1)}
 #btns button:first-child{border-right:2px solid #888}
-#btns button:active{box-shadow:0 0 12px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.25)}
+#btns button.pressed{box-shadow:0 0 20px rgba(0,0,0,.5),inset 0 4px 12px rgba(0,0,0,.3);
+  background:linear-gradient(180deg,#c0c0c0 0%,#b8b8b8 100%);transform:scale(.96)}
 #themeBtn{position:absolute;top:6px;right:8px;background:none;border:none;font-size:1.2em;
   cursor:pointer;opacity:.5;z-index:1;line-height:1}
 #themeBtn:active{opacity:.8}
@@ -112,12 +173,13 @@ body.dark #pad.dragging{background:linear-gradient(180deg,#262626 0%,#1e1e1e 100
 body.dark #btns button{background:linear-gradient(180deg,#2c2c2c 0%,#222 100%);color:#888;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.3)}
 body.dark #btns button:first-child{border-right-color:#111}
-body.dark #btns button:active{box-shadow:0 0 12px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.05)}
+body.dark #btns button.pressed{box-shadow:0 0 20px rgba(0,0,0,.8),inset 0 4px 12px rgba(0,0,0,.5);
+  background:linear-gradient(180deg,#1e1e1e 0%,#181818 100%);transform:scale(.96)}
 </style>
 </head>
 <body>
 <div id="main">
-  <div id="pad" data-status="{{HOSTNAME}} - 已连接">
+  <div id="pad" data-status="{{HOSTNAME}} - 连接中...">
     <button id="themeBtn">🌙</button>
   </div>
   <div id="btns">
@@ -130,6 +192,7 @@ const pad=document.getElementById('pad');
 const btnL=document.getElementById('btnL');
 const btnR=document.getElementById('btnR');
 const themeBtn=document.getElementById('themeBtn');
+const hostname='{{HOSTNAME}}';
 
 if(localStorage.getItem('dark')==='1'){document.body.classList.add('dark');themeBtn.textContent='☀️';}
 themeBtn.addEventListener('click',e=>{
@@ -145,52 +208,70 @@ themeBtn.addEventListener('touchend',e=>{
   themeBtn.textContent=dark?'☀️':'🌙';
   localStorage.setItem('dark',dark?'1':'0');
 });
+</script>
+<script>
+/* ── WebSocket 连接 ── */
+let ws=null,wsReady=false;
+function setStatus(s){pad.dataset.status=hostname+' - '+s;}
 
-const SENSITIVITY=1.8;
-const SCROLL_SENSITIVITY=2.0;
-const DOUBLE_TAP_MS=300;
-const DRAG_THRESHOLD=6;
-let lastX=0,lastY=0,touching=false,fingers=0;
-let scrollLastY=0;
-let dragging=false,moved=false;
-let lastTapTime=0,waitingSecondTap=false;
-let tapTimer=null;
+function connectWS(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.hostname+':{{WS_PORT}}');
+  ws.onopen=()=>{wsReady=true;setStatus('已连接');};
+  ws.onclose=()=>{wsReady=false;setStatus('连接断开');setTimeout(connectWS,1500);};
+  ws.onerror=()=>{ws.close();};
+}
+connectWS();
 
 function send(data){
-  fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(data)}).catch(()=>{});
+  if(wsReady&&ws.readyState===1) ws.send(JSON.stringify(data));
 }
+</script>
+<script>
+const SENSITIVITY=1.8;
+const SCROLL_SENSITIVITY=2.0;
+const DOUBLE_TAP_MS=180;
+let lastX=0,lastY=0,touching=false,fingers=0;
+let scrollLastY=0,scrollLastX=0,scrolling=false,scrollEndTime=0,scrollLastTime=0;
+const SCROLL_GUARD_MS=300;
+const SCROLL_SPEED_THRESHOLD=1.5; /* 速度阈值，超过才加速 */
+let dragging=false,moved=false,maxFingers=0;
+let lastTapTime=0,waitingSecondTap=false;
+let tapTimer=null,pendingDrag=false,longPressTimer=null;
+const LONG_PRESS_MS=500;
 
 function startDrag(){
-  dragging=true;
-  pad.classList.add('dragging');
+  dragging=true;pad.classList.add('dragging');
   send({t:'dragstart'});
   if(navigator.vibrate) navigator.vibrate(50);
 }
-
 function endDrag(){
-  if(dragging){
-    dragging=false;
-    pad.classList.remove('dragging');
-    send({t:'dragend'});
-  }
+  if(dragging){dragging=false;pad.classList.remove('dragging');send({t:'dragend'});}
 }
 
 pad.addEventListener('touchstart',e=>{
   e.preventDefault();
   fingers=e.touches.length;
+  if(fingers>maxFingers) maxFingers=fingers;
   moved=false;
   if(fingers===1){
     lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;
     const now=Date.now();
     if(waitingSecondTap&&(now-lastTapTime)<DOUBLE_TAP_MS){
-      /* 双击第二下落下，准备拖动 */
       waitingSecondTap=false;
       if(tapTimer){clearTimeout(tapTimer);tapTimer=null;}
-      startDrag();
+      pendingDrag=true; /* 等移动才拖动，不移动就是双击 */
     }
+    /* 长按进入拖动 */
+    longPressTimer=setTimeout(()=>{
+      if(!moved&&!dragging){startDrag();}
+    },LONG_PRESS_MS);
   }else if(fingers===2){
+    if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+    pendingDrag=false;
     scrollLastY=(e.touches[0].clientY+e.touches[1].clientY)/2;
+    scrollLastX=(e.touches[0].clientX+e.touches[1].clientX)/2;
+    scrollLastTime=Date.now();
   }
   touching=true;
 },{passive:false});
@@ -204,137 +285,98 @@ pad.addEventListener('touchmove',e=>{
     lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;
     if(Math.abs(dx)>0.5||Math.abs(dy)>0.5){
       moved=true;
-      send({t:'move',dx:dx,dy:dy});
+      if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+      if(pendingDrag&&!dragging){pendingDrag=false;startDrag();}
+      send({t:'move',dx,dy});
     }
   }else if(e.touches.length===2){
     const curY=(e.touches[0].clientY+e.touches[1].clientY)/2;
+    const curX=(e.touches[0].clientX+e.touches[1].clientX)/2;
     const dy=(curY-scrollLastY)*SCROLL_SENSITIVITY;
-    scrollLastY=curY;
-    if(Math.abs(dy)>1) send({t:'scroll',d:dy*3});
+    const dx=(curX-scrollLastX)*SCROLL_SENSITIVITY;
+    const now=Date.now();
+    const dt=Math.max(now-scrollLastTime,1);
+    scrollLastY=curY;scrollLastX=curX;scrollLastTime=now;
+    /* 速度=位移/时间，慢速匀速，快速拉动才加速 */
+    const speedY=Math.abs(dy)/dt;
+    const speedX=Math.abs(dx)/dt;
+    const accelY=speedY>SCROLL_SPEED_THRESHOLD?1+Math.min((speedY-SCROLL_SPEED_THRESHOLD)*0.8,2):1;
+    const accelX=speedX>SCROLL_SPEED_THRESHOLD?1+Math.min((speedX-SCROLL_SPEED_THRESHOLD)*0.8,2):1;
+    if(Math.abs(dy)>1){scrolling=true;send({t:'scroll',d:dy*accelY*3});}
+    if(Math.abs(dx)>1){scrolling=true;send({t:'hscroll',d:-dx*accelX*3});}
   }
 },{passive:false});
 
 pad.addEventListener('touchend',e=>{
   e.preventDefault();
-  if(dragging){
-    if(e.touches.length===0) endDrag();
-  }else if(fingers===1&&touching&&!moved){
-    /* 轻点抬起：记录时间，延迟发送单击（等看是否有第二次点击） */
-    const now=Date.now();
-    lastTapTime=now;
-    waitingSecondTap=true;
-    if(tapTimer) clearTimeout(tapTimer);
-    tapTimer=setTimeout(()=>{
-      /* 超时没有第二次点击，发送普通单击 */
-      waitingSecondTap=false;
-      send({t:'click'});
-    },DOUBLE_TAP_MS);
+  if(dragging){if(e.touches.length===0) endDrag();}
+  else if(pendingDrag&&!moved){
+    /* 双击未移动 = 双击 */
+    pendingDrag=false;
+    send({t:'click'});
+    setTimeout(()=>send({t:'click'}),30);
   }
-  if(e.touches.length===0){touching=false;fingers=0;}
+  else if(maxFingers===1&&fingers===1&&touching&&!moved){
+    const now=Date.now();lastTapTime=now;waitingSecondTap=true;
+    if(tapTimer) clearTimeout(tapTimer);
+    tapTimer=setTimeout(()=>{waitingSecondTap=false;send({t:'click'});},DOUBLE_TAP_MS);
+  }
+  if(e.touches.length===0){
+    if(scrolling){scrolling=false;scrollEndTime=Date.now();}
+    touching=false;fingers=0;maxFingers=0;pendingDrag=false;
+    if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}}
 },{passive:false});
 
+function btnGuard(){return scrolling||Date.now()-scrollEndTime<SCROLL_GUARD_MS;}
+btnL.addEventListener('touchstart',e=>{e.preventDefault();e.stopPropagation();if(btnGuard())return;btnL.classList.add('pressed');send({t:'click'});if(navigator.vibrate)navigator.vibrate(30);});
+btnR.addEventListener('touchstart',e=>{e.preventDefault();e.stopPropagation();if(btnGuard())return;btnR.classList.add('pressed');send({t:'rclick'});if(navigator.vibrate)navigator.vibrate(30);});
+btnL.addEventListener('touchend',()=>btnL.classList.remove('pressed'));
+btnL.addEventListener('touchcancel',()=>btnL.classList.remove('pressed'));
+btnR.addEventListener('touchend',()=>btnR.classList.remove('pressed'));
+btnR.addEventListener('touchcancel',()=>btnR.classList.remove('pressed'));
 btnL.addEventListener('click',()=>send({t:'click'}));
 btnR.addEventListener('click',()=>send({t:'rclick'}));
-
-const hostname=pad.dataset.status.split(' - ')[0];
-function checkConn(){
-  const ctrl=new AbortController();
-  const tm=setTimeout(()=>ctrl.abort(),2000);
-  fetch('/ping',{signal:ctrl.signal})
-    .then(r=>{clearTimeout(tm);pad.dataset.status=hostname+(r.ok?' - 已连接':' - 连接断开')})
-    .catch(()=>{clearTimeout(tm);pad.dataset.status=hostname+' - 连接断开'});
-}
-setInterval(checkConn,2000);
 </script>
 </body>
 </html>"""
 
 
-# ── HTTP 服务 ─────────────────────────────────────────────────
+# ── HTTP 服务 (仅提供页面) ────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
+    ws_port = 8867
+
     def log_message(self, fmt, *args):
-        pass  # 静默日志
+        pass
 
     def do_GET(self):
-        if self.path == "/ping":
-            self._json_resp({"ok": True})
-        else:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(HTML_PAGE.replace('{{HOSTNAME}}', platform.node()).encode())
-
-    def do_POST(self):
-        if self.path != "/api":
-            self.send_error(404)
-            return
-        length = int(self.headers.get("Content-Length", 0))
-        data = json.loads(self.rfile.read(length))
-        t = data.get("t")
-        if t == "move":
-            mouse_move(data["dx"], data["dy"])
-        elif t == "click":
-            mouse_click()
-            print("[点击] 左键")
-        elif t == "rclick":
-            mouse_right_click()
-            print("[点击] 右键")
-        elif t == "scroll":
-            mouse_scroll(data["d"])
-        elif t == "dragstart":
-            mouse_down()
-            print("[拖动] 开始")
-        elif t == "dragend":
-            mouse_up()
-            print("[拖动] 结束")
-        elif t == "type":
-            text = data.get("text", "")
-            if text:
-                mouse_click()  # 先点击当前鼠标位置获取焦点
-                import time; time.sleep(0.05)
-                type_text(text)
-                print(f"[输入] {text}")
-        elif t == "key":
-            key = data.get("key", "")
-            mod_ctrl = data.get("ctrl", False)
-            mod_alt = data.get("alt", False)
-            mod_shift = data.get("shift", False)
-            mod_win = data.get("win", False)
-            VK_MAP = {
-                "backspace": 0x08, "enter": 0x0D, "esc": 0x1B, "tab": 0x09,
-                "home": 0x24, "end": 0x23, "insert": 0x2D, "delete": 0x2E,
-                "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-                "f1":0x70,"f2":0x71,"f3":0x72,"f4":0x73,"f5":0x74,"f6":0x75,
-                "f7":0x76,"f8":0x77,"f9":0x78,"f10":0x79,"f11":0x7A,"f12":0x7B,
-                "prtsc": 0x2C, "pause": 0x13, "scrolllock": 0x91, "numlock": 0x90,
-            }
-            vk = VK_MAP.get(key)
-            if vk is not None:
-                # 按下修饰键
-                if mod_ctrl: user32.keybd_event(0x11, 0, 0, 0)
-                if mod_alt:  user32.keybd_event(0x12, 0, 0, 0)
-                if mod_shift:user32.keybd_event(0x10, 0, 0, 0)
-                if mod_win:  user32.keybd_event(0x5B, 0, 0, 0)
-                user32.keybd_event(vk, 0, 0, 0)
-                user32.keybd_event(vk, 0, 2, 0)
-                # 释放修饰键
-                if mod_win:  user32.keybd_event(0x5B, 0, 2, 0)
-                if mod_shift:user32.keybd_event(0x10, 0, 2, 0)
-                if mod_alt:  user32.keybd_event(0x12, 0, 2, 0)
-                if mod_ctrl: user32.keybd_event(0x11, 0, 2, 0)
-                mods = [m for m, v in [("Ctrl",mod_ctrl),("Alt",mod_alt),("Shift",mod_shift),("Win",mod_win)] if v]
-                prefix = "+".join(mods) + "+" if mods else ""
-                print(f"[按键] {prefix}{key}")
-        self._json_resp({"ok": True})
-
-    def _json_resp(self, obj):
-        body = json.dumps(obj).encode()
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(body)
+        page = HTML_PAGE.replace('{{HOSTNAME}}', platform.node())
+        page = page.replace('{{WS_PORT}}', str(self.ws_port))
+        self.wfile.write(page.encode())
+
+
+# ── WebSocket 服务 ────────────────────────────────────────────
+
+async def ws_handler(websocket):
+    async for message in websocket:
+        try:
+            data = json.loads(message)
+            handle_msg(data)
+        except Exception:
+            pass
+
+
+async def start_ws_server(port):
+    import websockets
+    async with websockets.serve(ws_handler, "0.0.0.0", port):
+        await asyncio.Future()  # 永远运行
+
+
+def run_ws(port):
+    asyncio.run(start_ws_server(port))
 
 
 def get_local_ip():
@@ -361,13 +403,21 @@ def print_qr(url):
         print("  (安装 qrcode 可显示二维码: pip install qrcode)")
 
 
-def main(port=8866):
+def main(http_port=8866, ws_port=8867):
     ip = get_local_ip()
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    url = f"http://{ip}:{port}"
+    Handler.ws_port = ws_port
+    url = f"http://{ip}:{http_port}"
+
+    # 启动 WebSocket 服务 (后台线程)
+    ws_thread = threading.Thread(target=run_ws, args=(ws_port,), daemon=True)
+    ws_thread.start()
+
+    # 启动 HTTP 服务
+    server = HTTPServer(("0.0.0.0", http_port), Handler)
     print(f"远程触摸板已启动")
-    print(f"  本机访问: http://127.0.0.1:{port}")
+    print(f"  本机访问: http://127.0.0.1:{http_port}")
     print(f"  手机访问: {url}")
+    print(f"  WebSocket: ws://{ip}:{ws_port}")
     print(f"  屏幕分辨率: {screen_w}x{screen_h}")
     print()
     print("扫码连接:")
@@ -382,5 +432,4 @@ def main(port=8866):
 
 
 if __name__ == "__main__":
-    main() 
-
+    main()
